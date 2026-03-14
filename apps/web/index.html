@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>voice-conscience</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0a0f1e;
+      --card:    #131d35;
+      --border:  #1e2d50;
+      --accent:  #3b82f6;
+      --green:   #22c55e;
+      --red:     #ef4444;
+      --amber:   #f59e0b;
+      --muted:   #64748b;
+      --text:    #e2e8f0;
+      --subtext: #94a3b8;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    header h1 { font-size: 18px; font-weight: 700; letter-spacing: .5px; }
+
+    #status-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: var(--red);
+      transition: background .3s;
+    }
+    #status-dot.connected { background: var(--green); }
+
+    #live-box {
+      margin: 12px 16px 4px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      min-height: 52px;
+      display: none;
+    }
+    #live-box.visible { display: block; }
+    #live-transcript { color: var(--text);    font-size: 14px; margin-bottom: 4px; }
+    #live-queued     { color: var(--amber);   font-size: 13px; margin-bottom: 4px; }
+    #live-processing { color: var(--accent);  font-size: 13px; }
+
+    #queue-badge {
+      text-align: right;
+      padding: 2px 20px 6px;
+      font-size: 12px;
+      color: var(--muted);
+      display: none;
+    }
+
+    #feed {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px 16px 16px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 10px;
+      animation: fadeIn .3s ease;
+    }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; } }
+
+    .card-input  { color: var(--subtext); font-size: 12px; font-style: italic; margin-bottom: 6px; }
+    .card-output { color: var(--text);    font-size: 15px; line-height: 1.5; }
+
+    #empty {
+      color: var(--muted);
+      text-align: center;
+      margin-top: 60px;
+      font-size: 14px;
+    }
+
+    footer {
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #btn {
+      padding: 14px 48px;
+      border-radius: 50px;
+      border: none;
+      font-size: 16px;
+      font-weight: 700;
+      color: #fff;
+      cursor: pointer;
+      background: var(--accent);
+      transition: transform .15s, background .2s;
+    }
+    #btn:hover { filter: brightness(1.1); }
+    #btn.recording {
+      background: var(--red);
+      animation: pulse 1.2s infinite;
+    }
+    @keyframes pulse {
+      0%,100% { transform: scale(1); }
+      50%      { transform: scale(1.08); }
+    }
+
+    #ws-url {
+      font-size: 12px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 4px 10px;
+      color: var(--subtext);
+      width: min(340px, 90vw);
+      text-align: center;
+    }
+
+    #error-bar {
+      background: #7f1d1d;
+      color: #fca5a5;
+      font-size: 13px;
+      padding: 8px 16px;
+      display: none;
+    }
+    #error-bar.visible { display: block; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>voice-conscience</h1>
+  <div id="status-dot" title="WebSocket"></div>
+</header>
+
+<div id="error-bar"></div>
+
+<div id="live-box">
+  <div id="live-transcript"></div>
+  <div id="live-queued"></div>
+  <div id="live-processing"></div>
+</div>
+<div id="queue-badge"></div>
+
+<div id="feed">
+  <div id="empty">Las respuestas aparecerán aquí…</div>
+</div>
+
+<footer>
+  <button id="btn">🎙 Escuchar</button>
+  <input id="ws-url" type="text" value="ws://localhost:8009/ws/voice" title="WebSocket URL" />
+</footer>
+
+<script>
+  const btn         = document.getElementById('btn')
+  const dot         = document.getElementById('status-dot')
+  const liveBox     = document.getElementById('live-box')
+  const liveTx      = document.getElementById('live-transcript')
+  const liveQ       = document.getElementById('live-queued')
+  const liveP       = document.getElementById('live-processing')
+  const qBadge      = document.getElementById('queue-badge')
+  const feed        = document.getElementById('feed')
+  const emptyEl     = document.getElementById('empty')
+  const errorBar    = document.getElementById('error-bar')
+  const wsUrlInput  = document.getElementById('ws-url')
+
+  const CHUNK_MS = 2000
+
+  let ws        = null
+  let recorder  = null
+  let interval  = null
+  let stream    = null
+  let recording = false
+
+  // ── WebSocket ─────────────────────────────────────────────────────────────
+  function connectWS() {
+    const url = wsUrlInput.value.trim()
+    ws = new WebSocket(url)
+
+    ws.onopen  = () => dot.classList.add('connected')
+    ws.onclose = () => {
+      dot.classList.remove('connected')
+      setTimeout(connectWS, 2000)
+    }
+    ws.onerror = () => ws.close()
+
+    ws.onmessage = (ev) => {
+      let msg
+      try { msg = JSON.parse(ev.data) } catch { return }
+      handleMessage(msg)
+    }
+  }
+
+  function handleMessage(msg) {
+    switch (msg.type) {
+      case 'transcription':
+        liveTx.textContent = '🎙 ' + msg.text
+        showLive()
+        break
+
+      case 'queued':
+        liveQ.textContent = '⏳ ' + msg.text
+        showLive()
+        break
+
+      case 'processing':
+        liveP.textContent = '⚙️  ' + msg.text
+        liveQ.textContent = ''
+        showLive()
+        break
+
+      case 'response':
+        liveP.textContent = ''
+        liveTx.textContent = ''
+        liveQ.textContent = ''
+        hideLiveIfEmpty()
+        addCard(msg.input, msg.output)
+        break
+
+      case 'status':
+        if (msg.queue_size > 0) {
+          qBadge.textContent = 'Cola: ' + msg.queue_size
+          qBadge.style.display = 'block'
+        } else {
+          qBadge.style.display = 'none'
+        }
+        break
+
+      case 'error':
+        showError(msg.msg)
+        break
+    }
+  }
+
+  function showLive() {
+    liveBox.classList.add('visible')
+  }
+  function hideLiveIfEmpty() {
+    if (!liveTx.textContent && !liveQ.textContent && !liveP.textContent) {
+      liveBox.classList.remove('visible')
+    }
+  }
+
+  function addCard(input, output) {
+    emptyEl.style.display = 'none'
+    const card = document.createElement('div')
+    card.className = 'card'
+    card.innerHTML = `
+      <div class="card-input">${escHtml(input)}</div>
+      <div class="card-output">${escHtml(output)}</div>
+    `
+    feed.insertBefore(card, feed.firstChild)
+  }
+
+  function showError(msg) {
+    errorBar.textContent = '⚠️ ' + msg
+    errorBar.classList.add('visible')
+    setTimeout(() => errorBar.classList.remove('visible'), 5000)
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  }
+
+  // ── Audio recording ───────────────────────────────────────────────────────
+  async function startRecording() {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    startChunk()
+    interval = setInterval(() => {
+      stopChunk()
+      startChunk()
+    }, CHUNK_MS)
+    recording = true
+    btn.textContent = '⏹ Detener'
+    btn.classList.add('recording')
+  }
+
+  function startChunk() {
+    // Prefer webm/opus (Chrome/Firefox); Safari uses mp4
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : 'audio/mp4'
+    recorder = new MediaRecorder(stream, { mimeType })
+    const chunks = []
+    recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data) }
+    recorder.onstop = async () => {
+      const blob = new Blob(chunks, { type: recorder.mimeType })
+      if (blob.size > 1024 && ws?.readyState === WebSocket.OPEN) {
+        ws.send(await blob.arrayBuffer())
+      }
+    }
+    recorder.start()
+  }
+
+  function stopChunk() {
+    if (recorder && recorder.state !== 'inactive') recorder.stop()
+  }
+
+  function stopRecording() {
+    clearInterval(interval)
+    interval = null
+    stopChunk()
+    stream?.getTracks().forEach(t => t.stop())
+    stream = null
+    recording = false
+    btn.textContent = '🎙 Escuchar'
+    btn.classList.remove('recording')
+  }
+
+  // ── Button ────────────────────────────────────────────────────────────────
+  btn.addEventListener('click', async () => {
+    if (!recording) {
+      try {
+        await startRecording()
+      } catch (e) {
+        showError('No se pudo acceder al micrófono: ' + e.message)
+      }
+    } else {
+      stopRecording()
+    }
+  })
+
+  // Reconnect when URL changes
+  wsUrlInput.addEventListener('change', () => {
+    ws?.close()
+  })
+
+  // ── Init ──────────────────────────────────────────────────────────────────
+  connectWS()
+</script>
+</body>
+</html>

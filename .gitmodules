@@ -1,0 +1,7 @@
+[submodule "services/backend"]
+	path = services/backend
+	url = https://github.com/luisforni/sherlok-backend.git
+
+[submodule "apps/mobile"]
+	path = apps/mobile
+	url = https://github.com/luisforni/sherlok-mobile.git

@@ -1,0 +1,51 @@
+version: "3.9"
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: voice-conscience-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: voice-conscience-ollama-init
+    depends_on:
+      ollama:
+        condition: service_started
+    environment:
+      - OLLAMA_HOST=ollama
+    entrypoint: >
+      sh -c "sleep 5 && ollama pull ${OLLAMA_MODEL:-llama3.2:3b}"
+    restart: "no"
+
+  backend:
+    build:
+      context: services/backend
+      dockerfile: Dockerfile
+    container_name: voice-conscience-backend
+    restart: unless-stopped
+    depends_on:
+      ollama:
+        condition: service_started
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      LLM_PROVIDER:    ${LLM_PROVIDER:-ollama}
+      OLLAMA_URL:      ${OLLAMA_URL:-http://ollama:11434}
+      OLLAMA_MODEL:    ${OLLAMA_MODEL:-llama3.2:3b}
+      OPENAI_API_KEY:  ${OPENAI_API_KEY:-}
+      OPENAI_MODEL:    ${OPENAI_MODEL:-gpt-4o-mini}
+      WHISPER_MODEL:   ${WHISPER_MODEL:-base}
+      LANGUAGE:        ${LANGUAGE:-es}
+      SILENCE_TIMEOUT: ${SILENCE_TIMEOUT:-2.5}
+      SILENCE_DB:      ${SILENCE_DB:--35}
+    volumes:
+      - whisper_cache:/root/.cache/huggingface
+
+volumes:
+  ollama_data:
+  whisper_cache:
